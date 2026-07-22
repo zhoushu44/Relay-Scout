@@ -20,8 +20,8 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# 安装 pm2 用于进程管理
-RUN npm install -g pm2
+# 安装 pm2 + Python3（server.cjs 调用 cf_quality_checker.py）
+RUN npm install -g pm2 && apk add --no-cache python3 py3-pip
 
 # 复制 package 文件
 COPY package*.json ./
@@ -32,10 +32,7 @@ RUN npm ci --only=production
 # 从构建阶段复制文件
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.cjs ./
-COPY --from=builder /app/proxy-scraper ./proxy-scraper
-
-# 创建数据目录
-RUN mkdir -p /app/proxy-scraper/output
+COPY --from=builder /app/cf_quality_checker.py ./
 
 # 暴露端口
 EXPOSE 8445

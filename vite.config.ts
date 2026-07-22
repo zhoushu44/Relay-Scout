@@ -38,11 +38,13 @@ export default defineConfig({
   plugins: [
     backendPlugin(),
     react({
-      babel: {
-        plugins: [
-          'react-dev-locator',
-        ],
-      },
+      babel: process.env.NODE_ENV === 'production'
+        ? undefined
+        : {
+            plugins: [
+              'react-dev-locator',
+            ],
+          },
     }),
     tsconfigPaths()
   ],
