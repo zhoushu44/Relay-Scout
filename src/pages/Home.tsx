@@ -34,6 +34,9 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [extracting, setExtracting] = useState(false);
+  const [pipelineStep, setPipelineStep] = useState(0);     // 0=未开始, 1=抓取, 2=提取, 3=检测
+  const [pipelineProgress, setPipelineProgress] = useState(0);
+  const [pipelineMessage, setPipelineMessage] = useState('');
   const [apiRegion, setApiRegion] = useState<'all' | 'domestic' | 'foreign'>('all');
   const [apiGrade, setApiGrade] = useState<'all' | 'good' | 'medium' | 'poor'>('all');
   const [quality, setQuality] = useState<QualitySummary>({ score: 0, grade: 'poor', averageLatency: 0, latestSuccessRate: 0, stableRate: 0, xaiReady: 0, residential: 0, unknownNetwork: 0 });
@@ -78,24 +81,45 @@ export default function Home() {
 
   const extractSocks5 = useCallback(async () => {
     setExtracting(true);
+    setPipelineStep(1);
+    setPipelineProgress(0);
+    setPipelineMessage('第 1 步：抓取代理源...');
     try {
-      const r = await fetch(`${API}/api/steps/extract`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ region: 'all' }),
+      const es = new EventSource(`${API}/api/pipeline`);
+      es.addEventListener('status', (e) => {
+        const data = JSON.parse(e.data);
+        if (data.step) setPipelineStep(data.step);
+        if (data.progress != null) setPipelineProgress(data.progress);
+        if (data.message) setPipelineMessage(data.message);
       });
-      const d = await r.json();
-      if (r.ok) {
-        alert(`提取完成：${d.newCount} 个 SOCKS5`);
+      es.addEventListener('log', (e) => {
+        const data = JSON.parse(e.data);
+        if (data.message) setPipelineMessage(data.message);
+      });
+      es.addEventListener('error', (e) => {
+        const data = (e as MessageEvent).data ? JSON.parse((e as MessageEvent).data) : {};
+        alert(`错误：${data.error || '流水线执行失败'}`);
+        es.close();
+        setExtracting(false);
+        setPipelineStep(0);
+      });
+      es.addEventListener('done', () => {
+        es.close();
+        setExtracting(false);
+        setPipelineProgress(100);
         fetchStats();
-      } else {
-        alert(`错误：${d.error}`);
-      }
+      });
+      es.onerror = () => {
+        es.close();
+        setExtracting(false);
+        setPipelineStep(0);
+      };
     } catch (e) {
       alert('无法连接服务');
+      setExtracting(false);
+      setPipelineStep(0);
     }
-    setExtracting(false);
-  }, []);
+  }, [fetchStats]);
 
   const copy = async (text: string) => {
     await navigator.clipboard.writeText(text);
@@ -174,25 +198,30 @@ export default function Home() {
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
             <button
-              onClick={extractSocks5}
-              disabled={extracting}
-              style={{
-                padding: '8px 16px',
-                background: extracting ? '#1f3a2f' : 'transparent',
-                color: extracting ? '#6b9080' : '#d1e7dd',
-                border: `1px solid ${extracting ? '#1f3a2f' : '#2d5a4a'}`,
-                borderRadius: '6px',
-                cursor: extracting ? 'not-allowed' : 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                fontSize: '13px',
-                fontWeight: 500,
-              }}
-            >
-              <Download size={14} />
-              {extracting ? '提取中...' : '提取 SOCKS5'}
-            </button>
+                onClick={extractSocks5}
+                disabled={extracting}
+                style={{
+                  padding: '8px 16px',
+                  background: extracting ? '#1f3a2f' : 'transparent',
+                  color: extracting ? '#6b9080' : '#d1e7dd',
+                  border: `1px solid ${extracting ? '#1f3a2f' : '#2d5a4a'}`,
+                  borderRadius: '6px',
+                  cursor: extracting ? 'not-allowed' : 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  fontSize: '13px',
+                  fontWeight: 500,
+                }}
+              >
+                <Download size={14} />
+                {extracting ? `${pipelineMessage}` : '提取 SOCKS5'}
+              </button>
+              {extracting && (
+                <div style={{ width: '120px', height: '4px', background: '#1f3a2f', borderRadius: '2px', overflow: 'hidden' }}>
+                  <div style={{ width: `${pipelineProgress}%`, height: '100%', background: '#4ade80', borderRadius: '2px', transition: 'width 0.3s' }} />
+                </div>
+              )}
             <div style={{ fontSize: '13px', color: '#6b9080' }}>
               池：<span style={{ color: '#4ade80', fontWeight: 600 }}>{stats.active}</span> 条
             </div>

@@ -409,6 +409,36 @@ const server = http.createServer(async (req, res) => {
       return json(res, 400, { error: error.message });
     }
   }
+  if (req.method === 'POST' && url.pathname === '/api/pipeline') {
+    if (activeRun) return json(res, 409, { error: '已有任务运行中，请先等待完成' });
+    const pipelineId = `pipeline-${Date.now()}`;
+    res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*' });
+    const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    send('status', { step: 1, total: 3, status: 'scraping', progress: 5, message: '第 1 步：抓取代理源...' });
+    const scrapeRun = startRun({ mode: 'scrape', url: 'https://accounts.x.ai/sign-up?redirect=grok-com' });
+    if (!scrapeRun) { send('error', { error: '无法启动抓取' }); return res.end(); }
+    activeRun = null;
+    const scrapeClients = [];
+    scrapeRun.clients.push({ write: (msg) => { const m = msg.match(/^event: (\w+)\ndata: (.+)\n\n$/); if (m) send(m[1], JSON.parse(m[2])); } });
+    const checkScrapeDone = () => new Promise((resolve) => { const iv = setInterval(() => { if (scrapeRun.status === 'done' || scrapeRun.status === 'failed') { clearInterval(iv); resolve(scrapeRun.status); } }, 200); });
+    const scrapeStatus = await checkScrapeDone();
+    if (scrapeStatus === 'failed') { send('error', { step: 1, error: '抓取失败' }); return res.end(); }
+    send('status', { step: 1, total: 3, status: 'done', progress: 33, message: '抓取完成' });
+    send('status', { step: 2, total: 3, status: 'extracting', progress: 36, message: '第 2 步：提取 SOCKS5...' });
+    try { const extractResult = extractSocks5('all'); send('status', { step: 2, total: 3, status: 'done', progress: 66, message: `提取完成：${extractResult.newCount} 个 SOCKS5` }); } catch (error) { send('error', { step: 2, error: error.message }); return res.end(); }
+    send('status', { step: 3, total: 3, status: 'checking', progress: 70, message: '第 3 步：检测代理质量...' });
+    const checkRun = startRun({ mode: 'check', url: 'https://accounts.x.ai/sign-up?redirect=grok-com', attempts: 10, concurrent: 10, timeout: 10 });
+    if (!checkRun) { send('error', { error: '无法启动检测' }); return res.end(); }
+    checkRun.clients.push({ write: (msg) => { const m = msg.match(/^event: (\w+)\ndata: (.+)\n\n$/); if (m) send(m[1], JSON.parse(m[2])); } });
+    const checkCheckDone = () => new Promise((resolve) => { const iv = setInterval(() => { if (checkRun.status === 'done' || checkRun.status === 'failed') { clearInterval(iv); resolve(checkRun.status); } }, 200); });
+    const checkStatus = await checkCheckDone();
+    if (checkStatus === 'failed') { send('error', { step: 3, error: '检测失败' }); return res.end(); }
+    const summary = summarize(checkRun);
+    const pool = readPool();
+    send('status', { step: 3, total: 3, status: 'done', progress: 100, message: `全部完成！活跃池 ${pool.active?.length || 0} 条`, summary, poolSize: pool.active?.length || 0 });
+    send('done', { status: 'done', summary });
+    return res.end();
+  }
   if (req.method === 'POST' && url.pathname === '/api/steps/extract') { try { const config = await body(req); return json(res, 200, extractSocks5(['all', 'domestic', 'foreign'].includes(config.region) ? config.region : 'all')); } catch (error) { return json(res, 400, { error: error.message }); } }
   if (req.method === 'POST' && url.pathname === '/api/runs') { try { const config = await body(req); if (!/^https?:\/\//i.test(config.url || '')) return json(res, 400, { error: '目标 URL 必须是 HTTP 或 HTTPS 地址' }); const run = startRun(config); if (!run) return json(res, 409, { error: '已有任务运行中，请先等待完成' }); return json(res, 202, { id: run.id, status: run.status }); } catch (error) { return json(res, 400, { error: error.message }); } }
   const match = url.pathname.match(/^\/api\/runs\/([^/]+)(?:\/(events|stop))?$/); if (match) { const run = runs.get(match[1]); if (!run) return json(res, 404, { error: '任务不存在' }); if (req.method === 'GET' && match[2] === 'events') { res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*' }); run.clients.push(res); res.write(`event: status\ndata: ${JSON.stringify({ status: run.status, progress: 0 })}\n\n`); req.on('close', () => run.clients = run.clients.filter((client) => client !== res)); return; } if (req.method === 'POST' && match[2] === 'stop') { run.stopped = true; run.status = 'stopped'; run.child?.kill(); activeRun = null; return json(res, 200, { status: run.status }); } if (req.method === 'GET') return json(res, 200, { ...run, clients: undefined, child: undefined }); }
