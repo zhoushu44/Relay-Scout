@@ -433,4 +433,4 @@ setInterval(async () => {
 }, POOL_CHECK_INTERVAL);
 
 console.log('智能池管理已启动：目标大小=' + POOL_TARGET_SIZE + ', 复检间隔=' + (POOL_RECHECK_INTERVAL/60000) + '分钟');
-server.listen(port, '127.0.0.1', () => console.log(`API ready at http://127.0.0.1:${port}`));
+server.listen(port, '0.0.0.0', () => console.log(`API ready at http://0.0.0.0:${port}`));
