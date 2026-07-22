@@ -309,7 +309,7 @@ function summarize(run) { const results = run.results || []; const latencies = r
 function runTask(run) {
   const resultFile = path.join(root, `${run.id}.json`); const isScrape = run.config.mode === 'scrape'; const isConnectivity = run.config.mode === 'connectivity';
   const inputFile = path.join(root, 'generated_socks5.txt'); if (run.config.mode === 'recheck') preparePoolCheck(); const python = process.platform === 'win32' ? 'python' : 'python3';
-  const checkInput = run.config.mode === 'check' ? path.join(root, 'alive_socks5.txt') : inputFile;
+  const checkInput = inputFile;
   const checkUrl = run.config.url;
   const args = isScrape
     ? ['src/index.js', '--all', '--no-verify']
@@ -318,7 +318,7 @@ function runTask(run) {
   const child = spawn(isScrape ? process.execPath : python, args, { cwd: isScrape ? path.join(root, 'proxy-scraper') : root, windowsHide: true }); run.child = child;
   child.stdout.on('data', (chunk) => sendEvent(run, 'status', { status: run.status, progress: isScrape ? 15 : 70, message: chunk.toString().trim() }));
   child.stderr.on('data', (chunk) => sendEvent(run, 'log', { message: chunk.toString().trim() }));
-  child.on('close', (code) => { if (run.stopped) { run.child = null; activeRun = null; return; } if (isScrape) { run.results = []; } else { const loaded = readJson(resultFile, []); run.results = Array.isArray(loaded) ? loaded : []; } run.results = run.results.map((item) => ({ ...item, region: item.region || 'unknown' })); if (isConnectivity) { const alive = run.results.filter((item) => item.exit_ip && item.exit_ip !== '-' && item.successes > 0).map((item) => item.proxy); fs.writeFileSync(path.join(root, 'alive_socks5.txt'), alive.join('\n') + (alive.length ? '\n' : ''), 'utf8'); } if (run.config.mode === 'recheck') run.pool = applyRecheck(run.results); else if (!isScrape && run.config.mode === 'check') run.pool = persistQualified(run.results); run.status = code === 0 || code === 2 ? 'done' : 'failed'; sendEvent(run, 'summary', summarize(run)); sendEvent(run, 'done', { status: run.status, code }); run.child = null; activeRun = null; try { fs.unlinkSync(resultFile); } catch {} });
+  child.on('close', (code) => { if (run.stopped) { run.child = null; activeRun = null; return; } if (isScrape) { run.results = []; } else { const loaded = readJson(resultFile, []); run.results = Array.isArray(loaded) ? loaded : []; } run.results = run.results.map((item) => ({ ...item, region: item.region || 'unknown' })); if (isConnectivity) { const alive = run.results.filter((item) => item.exit_ip && item.exit_ip !== '-' && item.successes > 0).map((item) => item.proxy); fs.writeFileSync(path.join(root, 'alive_socks5.txt'), alive.join('\n') + (alive.length ? '\n' : ''), 'utf8'); } if (run.config.mode === 'recheck') run.pool = applyRecheck(run.results); else if (!isScrape && run.config.mode === 'check') run.pool = persistQualified(run.results); run.status = code === 0 || code === 2 ? 'done' : 'failed'; run.error = run.status === 'failed' ? `检测进程退出，代码：${code}` : null; sendEvent(run, 'summary', summarize(run)); sendEvent(run, 'done', { status: run.status, code, error: run.error }); run.child = null; activeRun = null; try { fs.unlinkSync(resultFile); } catch {} });
 }
 function body(req) { return new Promise((resolve, reject) => { let data = ''; req.on('data', (chunk) => data += chunk); req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (error) { reject(error); } }); }); }
 function startRun(config = {}) { if (activeRun) return null; const id = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; const mode = ['scrape', 'check', 'connectivity', 'recheck'].includes(config.mode) ? config.mode : 'scrape'; const run = { id, config: { mode, url: config.url || 'https://accounts.x.ai/sign-up?redirect=grok-com', attempts: safeNumber(config.attempts, 10, 1, 100), concurrent: safeNumber(config.concurrent, 10, 1, 100), timeout: safeNumber(config.timeout, 10, 1, 120) }, status: 'queued', results: [], clients: [], stopped: false }; runs.set(id, run); activeRun = run; runTask(run); return run; }
@@ -414,18 +414,17 @@ const server = http.createServer(async (req, res) => {
     const pipelineId = `pipeline-${Date.now()}`;
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*' });
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    send('status', { step: 1, total: 3, status: 'scraping', progress: 5, message: '第 1 步：抓取代理源...' });
-    const scrapeRun = startRun({ mode: 'scrape', url: 'https://accounts.x.ai/sign-up?redirect=grok-com' });
-    if (!scrapeRun) { send('error', { error: '无法启动抓取' }); return res.end(); }
-    activeRun = null;
-    const scrapeClients = [];
-    scrapeRun.clients.push({ write: (msg) => { const m = msg.match(/^event: (\w+)\ndata: (.+)\n\n$/); if (m) send(m[1], JSON.parse(m[2])); } });
-    const checkScrapeDone = () => new Promise((resolve) => { const iv = setInterval(() => { if (scrapeRun.status === 'done' || scrapeRun.status === 'failed') { clearInterval(iv); resolve(scrapeRun.status); } }, 200); });
-    const scrapeStatus = await checkScrapeDone();
-    if (scrapeStatus === 'failed') { send('error', { step: 1, error: '抓取失败' }); return res.end(); }
-    send('status', { step: 1, total: 3, status: 'done', progress: 33, message: '抓取完成' });
+    send('status', { step: 1, total: 3, status: 'preparing', progress: 5, message: '第 1 步：读取代理源...' });
+    if (!fs.existsSync(path.join(root, 'generated_socks5.txt'))) { send('error', { step: 1, error: '服务器上没有 generated_socks5.txt 代理源文件' }); return res.end(); }
+    const sourceLinks = fs.readFileSync(path.join(root, 'generated_socks5.txt'), 'utf8').split(/\r?\n/).map((line) => line.trim()).filter((line) => /^socks5h?:\/\/[^:]+:\d+$/i.test(line));
+    if (!sourceLinks.length) { send('error', { step: 1, error: '代理源文件为空，没有可用 SOCKS5' }); return res.end(); }
+    send('status', { step: 1, total: 3, status: 'done', progress: 33, message: `代理源读取完成：${sourceLinks.length} 条` });
     send('status', { step: 2, total: 3, status: 'extracting', progress: 36, message: '第 2 步：提取 SOCKS5...' });
-    try { const extractResult = extractSocks5('all'); send('status', { step: 2, total: 3, status: 'done', progress: 66, message: `提取完成：${extractResult.newCount} 个 SOCKS5` }); } catch (error) { send('error', { step: 2, error: error.message }); return res.end(); }
+    try {
+      const uniqueLinks = [...new Set(sourceLinks.map((link) => link.replace(/^socks5h:/i, 'socks5:')))];
+      fs.writeFileSync(path.join(root, 'generated_socks5.txt'), uniqueLinks.join('\n') + '\n', 'utf8');
+      send('status', { step: 2, total: 3, status: 'done', progress: 66, message: `提取完成：${uniqueLinks.length} 个 SOCKS5` });
+    } catch (error) { send('error', { step: 2, error: error.message }); return res.end(); }
     send('status', { step: 3, total: 3, status: 'checking', progress: 70, message: '第 3 步：检测代理质量...' });
     const checkRun = startRun({ mode: 'check', url: 'https://accounts.x.ai/sign-up?redirect=grok-com', attempts: 10, concurrent: 10, timeout: 10 });
     if (!checkRun) { send('error', { error: '无法启动检测' }); return res.end(); }

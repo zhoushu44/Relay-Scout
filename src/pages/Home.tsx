@@ -85,37 +85,38 @@ export default function Home() {
     setPipelineProgress(0);
     setPipelineMessage('第 1 步：抓取代理源...');
     try {
-      const es = new EventSource(`${API}/api/pipeline`);
-      es.addEventListener('status', (e) => {
-        const data = JSON.parse(e.data);
-        if (data.step) setPipelineStep(data.step);
-        if (data.progress != null) setPipelineProgress(data.progress);
-        if (data.message) setPipelineMessage(data.message);
-      });
-      es.addEventListener('log', (e) => {
-        const data = JSON.parse(e.data);
-        if (data.message) setPipelineMessage(data.message);
-      });
-      es.addEventListener('error', (e) => {
-        const data = (e as MessageEvent).data ? JSON.parse((e as MessageEvent).data) : {};
-        alert(`错误：${data.error || '流水线执行失败'}`);
-        es.close();
-        setExtracting(false);
-        setPipelineStep(0);
-      });
-      es.addEventListener('done', () => {
-        es.close();
-        setExtracting(false);
-        setPipelineProgress(100);
-        fetchStats();
-      });
-      es.onerror = () => {
-        es.close();
-        setExtracting(false);
-        setPipelineStep(0);
-      };
+      const response = await fetch(`${API}/api/pipeline`, { method: 'POST' });
+      if (!response.ok || !response.body) throw new Error(`服务返回 ${response.status}`);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() || '';
+        for (const event of events) {
+          const lines = event.split('\n');
+          const type = lines.find((line) => line.startsWith('event: '))?.slice(7);
+          const dataLine = lines.find((line) => line.startsWith('data: '));
+          if (!dataLine) continue;
+          const data = JSON.parse(dataLine.slice(6));
+          if (type === 'status') {
+            if (data.step) setPipelineStep(data.step);
+            if (data.progress != null) setPipelineProgress(data.progress);
+            if (data.message) setPipelineMessage(data.message);
+          } else if (type === 'error') {
+            throw new Error(data.error || '流水线执行失败');
+          } else if (type === 'done') {
+            setPipelineProgress(100);
+            fetchStats();
+          }
+        }
+        if (done) break;
+      }
     } catch (e) {
-      alert('无法连接服务');
+      alert(`错误：${e instanceof Error ? e.message : '无法连接服务'}`);
+    } finally {
       setExtracting(false);
       setPipelineStep(0);
     }

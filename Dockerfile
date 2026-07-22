@@ -20,8 +20,10 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# 安装 pm2 + Python3（server.cjs 调用 cf_quality_checker.py）
+# 安装 pm2 + Python3 及检测依赖
 RUN npm install -g pm2 && apk add --no-cache python3 py3-pip
+RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir aiohttp aiohttp-socks PyYAML
+ENV PATH="/opt/venv/bin:$PATH"
 
 # 复制 package 文件
 COPY package*.json ./
@@ -33,6 +35,8 @@ RUN npm ci --only=production
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.cjs ./
 COPY --from=builder /app/cf_quality_checker.py ./
+COPY --from=builder /app/generated_socks5.txt ./
+COPY --from=builder /app/socks5-pool.json ./
 
 # 暴露端口
 EXPOSE 8445
