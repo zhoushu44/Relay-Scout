@@ -61,17 +61,12 @@ def build_session(proxy_info):
     return aiohttp.ClientSession(connector=ProxyConnector.from_url(proxy_url))
 
 
-XAI_MARKERS = ("accounts.x.ai", "sign up", "create your account", "grok")
-
-
 def classify_response(status: int, body: str, url: str) -> tuple[bool, str]:
     if status in (403, 429, 503):
         return False, f"HTTP {status}"
     lowered = body.lower()
     if any(marker in lowered for marker in CHALLENGE_MARKERS):
         return False, "CF挑战页"
-    if "accounts.x.ai" in url.lower() and not any(marker in lowered for marker in XAI_MARKERS):
-        return False, "未识别到 xAI 注册页"
     if 200 <= status < 400:
         return True, "成功"
     return False, f"HTTP {status}"
@@ -115,9 +110,6 @@ async def check_one(proxy_info, url: str, attempts: int, timeout: int, threshold
 
     try:
         async with build_session(proxy_info) as session:
-            exit_ip = await get_exit_ip(session, timeout)
-            if exit_ip:
-                exit_ips.append(exit_ip)
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
@@ -126,9 +118,6 @@ async def check_one(proxy_info, url: str, attempts: int, timeout: int, threshold
                 "Cache-Control": "no-cache",
             }
             for _ in range(attempts):
-                current_exit_ip = await get_exit_ip(session, timeout)
-                if current_exit_ip:
-                    exit_ips.append(current_exit_ip)
                 started = time.perf_counter()
                 try:
                     async with session.get(
@@ -139,24 +128,27 @@ async def check_one(proxy_info, url: str, attempts: int, timeout: int, threshold
                     ) as response:
                         body = await response.text(errors="replace")
                         ok, reason = classify_response(response.status, body, url)
-                        if ok:
+                        exit_ip = next((line[3:].strip() for line in body.splitlines() if line.startswith("ip=")), None)
+                        if exit_ip:
+                            exit_ips.append(exit_ip)
+                        if ok and exit_ip:
                             successes += 1
                             latencies.append((time.perf_counter() - started) * 1000)
                         else:
-                            errors[reason] = errors.get(reason, 0) + 1
+                            errors[reason if not ok else "出口 IP 不可用"] = errors.get(reason if not ok else "出口 IP 不可用", 0) + 1
                 except asyncio.TimeoutError:
                     errors["超时"] = errors.get("超时", 0) + 1
                 except Exception as exc:
                     reason = type(exc).__name__
                     errors[reason] = errors.get(reason, 0) + 1
+            if exit_ips:
+                reputation_result = await reputation(session, exit_ips[0], timeout)
     except Exception as exc:
         errors[type(exc).__name__] = attempts
 
     rate = successes / attempts * 100
     avg_latency = statistics.fmean(latencies) if latencies else None
     stable = bool(exit_ips) and len(set(exit_ips)) == 1
-    if exit_ips and 'session' in locals():
-        reputation_result = await reputation(session, exit_ips[0], timeout)
     main_error = max(errors, key=errors.get) if errors else "-"
     qualified = bool(exit_ips) and stable and rate >= threshold and avg_latency is not None and avg_latency <= max_latency
     country_code = reputation_result.get("country_code")

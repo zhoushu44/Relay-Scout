@@ -23,7 +23,6 @@ type QualitySummary = {
   averageLatency: number;
   latestSuccessRate: number;
   stableRate: number;
-  xaiReady: number;
   residential: number;
   unknownNetwork: number;
 };
@@ -39,7 +38,7 @@ export default function Home() {
   const [pipelineMessage, setPipelineMessage] = useState('');
   const [apiRegion, setApiRegion] = useState<'all' | 'domestic' | 'foreign'>('all');
   const [apiGrade, setApiGrade] = useState<'all' | 'good' | 'medium' | 'poor'>('all');
-  const [quality, setQuality] = useState<QualitySummary>({ score: 0, grade: 'poor', averageLatency: 0, latestSuccessRate: 0, stableRate: 0, xaiReady: 0, residential: 0, unknownNetwork: 0 });
+  const [quality, setQuality] = useState<QualitySummary>({ score: 0, grade: 'poor', averageLatency: 0, latestSuccessRate: 0, stableRate: 0, residential: 0, unknownNetwork: 0 });
   const [apiCopied, setApiCopied] = useState(false);
   const [serverIp, setServerIp] = useState('');
   const [testingApi, setTestingApi] = useState(false);
@@ -309,7 +308,7 @@ export default function Home() {
                 <div>
                   <div style={{ fontSize: '12px', color: '#6b9080', marginBottom: '4px' }}>质量</div>
                   <div style={{ fontSize: '14px', color: '#4ade80' }}>
-                    {current.quality === 'connected' ? '连通' : current.quality === 'cf_passed' ? 'CF 可用' : 'xAI 可用'}
+                    {current.quality === 'cf_passed' ? 'CF 可用' : '连通'}
                   </div>
                 </div>
               </div>
@@ -375,7 +374,6 @@ export default function Home() {
                 ['平均延迟', `${quality.averageLatency}ms`],
                 ['近一轮成功率', `${quality.latestSuccessRate}%`],
                 ['稳定代理', `${quality.stableRate}%`],
-                ['xAI 可用', `${quality.xaiReady} 条`],
               ].map(([label, value]) => (
                 <div key={label} style={{ padding: '14px', background: '#0a0f0d', borderRadius: '8px' }}>
                   <div style={{ fontSize: '11px', color: '#6b9080', marginBottom: '6px' }}>{label}</div>

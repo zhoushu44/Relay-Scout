@@ -1,0 +1,79 @@
+[
+  {
+    "proxy": "socks5://47.79.253.110:3080",
+    "successes": 3,
+    "attempts": 3,
+    "rate": 100.0,
+    "qualified": true,
+    "latency": 271.65219994882744,
+    "exit_ip": "47.79.253.110",
+    "region": "foreign",
+    "exit_ip_stable": true,
+    "reputation": {
+      "status": "suspicious",
+      "proxy": true,
+      "vpn": true,
+      "residential": false,
+      "country_code": "SG"
+    },
+    "timeout_rate": 0.0,
+    "error": "-"
+  },
+  {
+    "proxy": "socks5://121.169.46.116:1090",
+    "successes": 3,
+    "attempts": 3,
+    "rate": 100.0,
+    "qualified": true,
+    "latency": 316.67753332294524,
+    "exit_ip": "121.169.46.116",
+    "region": "foreign",
+    "exit_ip_stable": true,
+    "reputation": {
+      "status": "suspicious",
+      "proxy": true,
+      "vpn": false,
+      "residential": false,
+      "country_code": "KR"
+    },
+    "timeout_rate": 0.0,
+    "error": "-"
+  },
+  {
+    "proxy": "socks5://144.24.111.128:1088",
+    "successes": 3,
+    "attempts": 3,
+    "rate": 100.0,
+    "qualified": true,
+    "latency": 329.7018332717319,
+    "exit_ip": "144.24.111.128",
+    "region": "foreign",
+    "exit_ip_stable": true,
+    "reputation": {
+      "status": "suspicious",
+      "proxy": true,
+      "vpn": true,
+      "residential": false,
+      "country_code": "IN"
+    },
+    "timeout_rate": 0.0,
+    "error": "-"
+  },
+  {
+    "proxy": "socks5://185.128.104.152:8443",
+    "successes": 3,
+    "attempts": 3,
+    "rate": 100.0,
+    "qualified": true,
+    "latency": 721.0155999443183,
+    "exit_ip": "185.128.104.152",
+    "region": "unknown",
+    "exit_ip_stable": true,
+    "reputation": {
+      "status": "unknown",
+      "reason": "TimeoutError"
+    },
+    "timeout_rate": 0.0,
+    "error": "-"
+  }
+]

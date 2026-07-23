@@ -1,7 +1,9 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const dns = require('node:dns');
 const { spawn } = require('node:child_process');
+dns.setDefaultResultOrder('ipv4first');
 
 const root = __dirname;
 const port = Number(process.env.PORT || 5778);
@@ -27,6 +29,50 @@ function getRegion(item) {
   if (!value) return 'unknown';
   return domesticCodes.has(value) ? 'domestic' : 'foreign';
 }
+const proxySources = [
+  'https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/socks5.txt',
+  'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt',
+  'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt',
+  'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/socks5/data.txt',
+  'https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_RAW.txt',
+  'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/socks5.txt',
+  'https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/socks5.txt',
+  'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-socks5.txt',
+  'https://raw.githubusercontent.com/wiki/gfpcom/free-proxy-list/lists/socks5.txt',
+  'https://raw.githubusercontent.com/prxchk/proxy-list/main/socks5.txt',
+  'https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all'
+];
+async function readLimitedText(response, maxBytes = 5_000_000) {
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  while (size < maxBytes) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value.subarray(0, maxBytes - size));
+    size += value.length;
+  }
+  if (size >= maxBytes) await reader.cancel();
+  return new TextDecoder().decode(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
+}
+async function scrapeSocks5(send, maxLinks = 500) {
+  const settled = await Promise.allSettled(proxySources.map(async (url) => {
+    const response = await fetch(url, { signal: AbortSignal.timeout(15000), headers: { 'User-Agent': 'Relay-Scout/1.0' } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const text = await readLimitedText(response);
+    const links = [...text.matchAll(/(?:socks5h?:\/\/)?((?:\d{1,3}\.){3}\d{1,3}):(\d{1,5})/gi)]
+      .filter((match) => match[1].split('.').every((part) => Number(part) <= 255) && Number(match[2]) <= 65535)
+      .map((match) => `socks5://${match[1]}:${match[2]}`);
+    send('log', { message: `抓取源 ${new URL(url).hostname}：${links.length} 条` });
+    return links;
+  }));
+  const links = [...new Set(settled.flatMap((result) => result.status === 'fulfilled' ? result.value : []))]
+    .sort(() => Math.random() - 0.5)
+    .slice(0, maxLinks);
+  const failed = settled.filter((result) => result.status === 'rejected').length;
+  if (!links.length) throw new Error(`在线代理源全部失败（失败源 ${failed}/${proxySources.length}）`);
+  return { links, failed };
+}
 function extractSocks5(region = 'all') {
   const source = path.join(root, 'proxy-scraper', 'output', 'all_proxies.json');
   if (!fs.existsSync(source)) throw new Error('请先执行第 1 步抓取代理源');
@@ -47,8 +93,8 @@ function extractSocks5(region = 'all') {
 // 智能池管理函数
 let isRechecking = false;
 let isRefilling = false;
-const POOL_TARGET_SIZE = 100;
-const POOL_MIN_THRESHOLD = 80;
+const POOL_TARGET_SIZE = 30;
+const POOL_MIN_THRESHOLD = 20;
 const POOL_RECHECK_COUNT = 10;
 const POOL_RECHECK_INTERVAL = 5 * 60 * 1000; // 5 分钟
 const POOL_CHECK_INTERVAL = 60 * 1000; // 1 分钟
@@ -60,7 +106,7 @@ function scoreProxy(item) {
   const stable = failures === 0 && item.ip && item.ip !== '-';
   const residential = item.isResidential === true || item.is_residential === true;
   const latencyScore = latency <= 300 ? 25 : latency <= 800 ? 20 : latency <= 1500 ? 12 : latency <= 3000 ? 5 : 0;
-  const targetScore = item.quality === 'xai_ready' ? 10 : item.quality === 'cf_passed' ? 6 : 2;
+  const targetScore = item.quality === 'cf_passed' ? 6 : 2;
   const score = Math.round(rate * 0.3 + latencyScore + (stable ? 15 : 0) + (failures === 0 ? 15 : failures === 1 ? 6 : 0) + targetScore + (residential ? 5 : 0));
   const grade = residential && score >= 80 && latency <= 800 && rate >= 90 && stable
     ? 'good'
@@ -92,7 +138,6 @@ function poolQualitySummary(items) {
     averageLatency: Math.round(average('latency')),
     latestSuccessRate: Math.round(average('successRate')),
     stableRate: total ? Math.round(list.filter(item => item.stable).length / total * 100) : 0,
-    xaiReady: list.filter(item => item.quality === 'xai_ready').length,
     residential: list.filter(item => item.networkType === 'residential').length,
     unknownNetwork: list.filter(item => item.networkType === 'unknown').length,
     grades: {
@@ -139,7 +184,7 @@ function applySmartRecheck(results) {
   return { rechecked: results.length, passed, failed, eliminated, activeCount: pool.active.length };
 }
 
-function persistQualified(results) {
+function persistQualified(results, maxAdd = Infinity) {
   const pool = readPool() || { active: [], pending: [], eliminated: [] };
   pool.active = Array.isArray(pool.active) ? pool.active : [];
   const existing = new Set(pool.active.map((item) => item.proxy));
@@ -147,8 +192,9 @@ function persistQualified(results) {
   
   for (const item of results.filter((row) => {
     const connected = row.exit_ip && row.exit_ip !== '-' && row.successes > 0;
-    return connected && ['domestic', 'foreign', 'unknown'].includes(row.region || 'unknown');
+    return connected && row.qualified === true && ['domestic', 'foreign', 'unknown'].includes(row.region || 'unknown');
   })) {
+    if (added >= maxAdd) break;
     if (existing.has(item.proxy)) continue;
     pool.active.push({
       proxy: item.proxy,
@@ -181,47 +227,40 @@ async function smartRefill(targetSize = POOL_TARGET_SIZE) {
   }
   
   isRefilling = true;
-  const needed = targetSize - currentSize;
   
   try {
-    const source = path.join(root, 'proxy-scraper', 'output', 'all_proxies.json');
-    if (!fs.existsSync(source)) {
-      return { success: false, reason: '请先执行第 1 步抓取代理源' };
-    }
-    
-    const parsed = readJson(source, []);
-    const data = Array.isArray(parsed) ? parsed : parsed.proxies || parsed.data || [];
+    const checkedProxies = new Set((pool.checked || []).map((item) => item.proxy));
+    const scraped = await scrapeSocks5(() => {}, 100000);
+    const data = scraped.links.map((proxy) => ({ proxy }));
     const unique = new Map();
-    
-    const existingProxies = new Set((pool.active || []).map(p => p.proxy));
-    
+    const existingProxies = new Set([
+      ...(pool.active || []).map((item) => item.proxy),
+      ...(pool.eliminated || []).map((item) => item.proxy),
+      ...checkedProxies
+    ]);
+
     for (const item of data) {
-      if (unique.size >= needed * 3) break;
-      
-      const raw = String(item.proxy || item.url || '').trim();
-      const protocol = String(item.protocol || (raw.match(/^([^:]+):\/\//) || [])[1] || '').toLowerCase();
-      const address = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '') || `${item.ip || item.host || ''}:${item.port || ''}`;
-      const match = address.match(/^([^:@]+):([0-9]+)$/);
-      
-      if (!['socks5', 'socks5h'].includes(protocol) || !match) continue;
-      
+      if (unique.size >= 500) break;
+      const raw = String(item.proxy || '').trim();
+      const match = raw.match(/^socks5h?:\/\/([^:@]+):([0-9]+)$/i);
+      if (!match) continue;
       const proxyUrl = `socks5://${match[1]}:${match[2]}`;
       if (existingProxies.has(proxyUrl) || unique.has(proxyUrl)) continue;
-      
-      unique.set(proxyUrl, { proxy: proxyUrl, region: getRegion(item) });
+      unique.set(proxyUrl, { proxy: proxyUrl, region: item.region || 'unknown' });
     }
-    
-    const newLinks = [...unique.values()].map(p => p.proxy);
+
+    const newLinks = [...unique.values()].map((item) => item.proxy);
     if (newLinks.length === 0) {
       isRefilling = false;
-      return { success: false, reason: '没有新的代理可补充' };
+      return { success: false, reason: '当前代理源没有未检测的新代理' };
     }
     
-    fs.writeFileSync(path.join(root, 'generated_socks5.txt'), newLinks.join('\n') + (newLinks.length ? '\n' : ''), 'utf8');
-    
+    const refillInputFile = path.join(root, `refill-input-${Date.now()}.txt`);
+    fs.writeFileSync(refillInputFile, newLinks.join('\n') + '\n', 'utf8');
+
     const resultFile = path.join(root, `refill-${Date.now()}.json`);
     const python = process.platform === 'win32' ? 'python' : (process.env.PYTHON_BIN || '/opt/venv/bin/python');
-    const args = ['cf_quality_checker.py', '-f', path.join(root, 'generated_socks5.txt'), '-u', 'https://www.cloudflare.com/cdn-cgi/trace', '-n', '1', '-c', '200', '-t', '3', '--threshold', '0', '--max-latency', '3000', '--json-output', resultFile];
+    const args = ['cf_quality_checker.py', '-f', refillInputFile, '-u', 'https://www.cloudflare.com/cdn-cgi/trace', '-n', '3', '-c', '40', '-t', '5', '--threshold', '100', '--max-latency', '800', '--json-output', resultFile];
     
     await new Promise((resolve, reject) => {
       const child = spawn(python, args, { cwd: root, windowsHide: true });
@@ -233,12 +272,21 @@ async function smartRefill(targetSize = POOL_TARGET_SIZE) {
     });
     
     const results = readJson(resultFile, []);
-    const { added, activeCount } = persistQualified(results);
+    const updatedPool = readPool();
+    const checked = new Map((updatedPool.checked || []).map((item) => [item.proxy, item]));
+    for (const result of results) {
+      if (result.proxy) checked.set(result.proxy, { proxy: result.proxy, checkedAt: new Date().toISOString(), qualified: Boolean(result.qualified) });
+    }
+    updatedPool.checked = [...checked.values()];
+    writePool(updatedPool);
+    const { added, activeCount } = persistQualified(results, targetSize - currentSize);
     
     try { fs.unlinkSync(resultFile); } catch {}
-    
-    pool.stats.lastRefill = new Date().toISOString();
-    writePool(pool);
+    try { fs.unlinkSync(refillInputFile); } catch {}
+
+    const finalPool = readPool();
+    finalPool.stats.lastRefill = new Date().toISOString();
+    writePool(finalPool);
     
     isRefilling = false;
     return { success: true, previousSize: currentSize, added, newSize: activeCount };
@@ -250,7 +298,7 @@ async function smartRefill(targetSize = POOL_TARGET_SIZE) {
 }
 
 async function smartRecheck(count = POOL_RECHECK_COUNT) {
-  if (isRechecking) return { success: false, reason: '已在复检中' };
+  if (isRechecking || isRefilling) return { success: false, reason: isRechecking ? '已在复检中' : '正在补充中' };
   
   const pool = readPool();
   const activeCount = pool.active?.length || 0;
@@ -274,11 +322,12 @@ async function smartRecheck(count = POOL_RECHECK_COUNT) {
       return { success: false, reason: '没有需要复检的代理' };
     }
     
-    fs.writeFileSync(path.join(root, 'generated_socks5.txt'), toCheck.map(p => p.proxy).join('\n') + (toCheck.length ? '\n' : ''), 'utf8');
-    
+    const recheckInputFile = path.join(root, `recheck-input-${Date.now()}.txt`);
+    fs.writeFileSync(recheckInputFile, toCheck.map((item) => item.proxy).join('\n') + '\n', 'utf8');
+
     const resultFile = path.join(root, `recheck-${Date.now()}.json`);
-    const python = process.platform === 'win32' ? 'python' : 'python3';
-    const args = ['cf_quality_checker.py', '-f', path.join(root, 'generated_socks5.txt'), '-u', 'https://www.cloudflare.com/cdn-cgi/trace', '-n', '1', '-c', '50', '-t', '3', '--threshold', '0', '--max-latency', '3000', '--json-output', resultFile];
+    const python = process.platform === 'win32' ? 'python' : (process.env.PYTHON_BIN || '/opt/venv/bin/python');
+    const args = ['cf_quality_checker.py', '-f', recheckInputFile, '-u', 'https://www.cloudflare.com/cdn-cgi/trace', '-n', '1', '-c', '50', '-t', '3', '--threshold', '0', '--max-latency', '3000', '--json-output', resultFile];
     
     await new Promise((resolve, reject) => {
       const child = spawn(python, args, { cwd: root, windowsHide: true });
@@ -293,7 +342,8 @@ async function smartRecheck(count = POOL_RECHECK_COUNT) {
     const recheckResult = applySmartRecheck(results);
     
     try { fs.unlinkSync(resultFile); } catch {}
-    
+    try { fs.unlinkSync(recheckInputFile); } catch {}
+
     isRechecking = false;
     return { success: true, ...recheckResult };
     
@@ -321,7 +371,7 @@ function runTask(run) {
   child.on('close', (code) => { if (run.stopped) { run.child = null; activeRun = null; return; } if (isScrape) { run.results = []; } else { const loaded = readJson(resultFile, []); run.results = Array.isArray(loaded) ? loaded : []; } run.results = run.results.map((item) => ({ ...item, region: item.region || 'unknown' })); if (isConnectivity) { const alive = run.results.filter((item) => item.exit_ip && item.exit_ip !== '-' && item.successes > 0).map((item) => item.proxy); fs.writeFileSync(path.join(root, 'alive_socks5.txt'), alive.join('\n') + (alive.length ? '\n' : ''), 'utf8'); } if (run.config.mode === 'recheck') run.pool = applyRecheck(run.results); else if (!isScrape && run.config.mode === 'check') run.pool = persistQualified(run.results); run.status = code === 0 || code === 2 ? 'done' : 'failed'; run.error = run.status === 'failed' ? `检测进程退出，代码：${code}` : null; sendEvent(run, 'summary', summarize(run)); sendEvent(run, 'done', { status: run.status, code, error: run.error }); run.child = null; activeRun = null; try { fs.unlinkSync(resultFile); } catch {} });
 }
 function body(req) { return new Promise((resolve, reject) => { let data = ''; req.on('data', (chunk) => data += chunk); req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (error) { reject(error); } }); }); }
-function startRun(config = {}) { if (activeRun) return null; const id = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; const mode = ['scrape', 'check', 'connectivity', 'recheck'].includes(config.mode) ? config.mode : 'scrape'; const run = { id, config: { mode, url: config.url || 'https://accounts.x.ai/sign-up?redirect=grok-com', attempts: safeNumber(config.attempts, 10, 1, 100), concurrent: safeNumber(config.concurrent, 10, 1, 100), timeout: safeNumber(config.timeout, 10, 1, 120) }, status: 'queued', results: [], clients: [], stopped: false }; runs.set(id, run); activeRun = run; runTask(run); return run; }
+function startRun(config = {}) { if (activeRun) return null; const id = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; const mode = ['scrape', 'check', 'connectivity', 'recheck'].includes(config.mode) ? config.mode : 'scrape'; const run = { id, config: { mode, url: config.url || 'https://www.cloudflare.com/cdn-cgi/trace', attempts: safeNumber(config.attempts, 10, 1, 100), concurrent: safeNumber(config.concurrent, 10, 1, 100), timeout: safeNumber(config.timeout, 10, 1, 120) }, status: 'queued', results: [], clients: [], stopped: false }; runs.set(id, run); activeRun = run; runTask(run); return run; }
 const server = http.createServer(async (req, res) => {
   if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type' }); return res.end(); }
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -403,7 +453,7 @@ const server = http.createServer(async (req, res) => {
     try {
       const config = await body(req);
       const targetSize = Math.min(Math.max(10, Number(config.targetSize) || POOL_TARGET_SIZE), 500);
-      smartRefill(targetSize).then(() => console.log('补充完成'));
+      smartRefill(targetSize).then((result) => console.log('补充完成', result));
       return json(res, 202, { success: true, message: '补充已开始' });
     } catch (error) {
       return json(res, 400, { error: error.message });
@@ -414,11 +464,16 @@ const server = http.createServer(async (req, res) => {
     const pipelineId = `pipeline-${Date.now()}`;
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*' });
     const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-    send('status', { step: 1, total: 3, status: 'preparing', progress: 5, message: '第 1 步：读取代理源...' });
-    if (!fs.existsSync(path.join(root, 'generated_socks5.txt'))) { send('error', { step: 1, error: '服务器上没有 generated_socks5.txt 代理源文件' }); return res.end(); }
-    const sourceLinks = fs.readFileSync(path.join(root, 'generated_socks5.txt'), 'utf8').split(/\r?\n/).map((line) => line.trim()).filter((line) => /^socks5h?:\/\/[^:]+:\d+$/i.test(line));
-    if (!sourceLinks.length) { send('error', { step: 1, error: '代理源文件为空，没有可用 SOCKS5' }); return res.end(); }
-    send('status', { step: 1, total: 3, status: 'done', progress: 33, message: `代理源读取完成：${sourceLinks.length} 条` });
+    send('status', { step: 1, total: 3, status: 'scraping', progress: 5, message: '第 1 步：在线抓取新的代理源...' });
+    let sourceLinks;
+    try {
+      const scraped = await scrapeSocks5(send);
+      sourceLinks = scraped.links;
+      send('status', { step: 1, total: 3, status: 'done', progress: 33, message: `在线抓取完成：${sourceLinks.length} 条新候选（失败源 ${scraped.failed}/${proxySources.length}）` });
+    } catch (error) {
+      send('error', { step: 1, error: error.message });
+      return res.end();
+    }
     send('status', { step: 2, total: 3, status: 'extracting', progress: 36, message: '第 2 步：提取 SOCKS5...' });
     try {
       const uniqueLinks = [...new Set(sourceLinks.map((link) => link.replace(/^socks5h:/i, 'socks5:')))];
@@ -426,7 +481,7 @@ const server = http.createServer(async (req, res) => {
       send('status', { step: 2, total: 3, status: 'done', progress: 66, message: `提取完成：${uniqueLinks.length} 个 SOCKS5` });
     } catch (error) { send('error', { step: 2, error: error.message }); return res.end(); }
     send('status', { step: 3, total: 3, status: 'checking', progress: 70, message: '第 3 步：检测代理质量...' });
-    const checkRun = startRun({ mode: 'check', url: 'https://accounts.x.ai/sign-up?redirect=grok-com', attempts: 10, concurrent: 10, timeout: 10 });
+    const checkRun = startRun({ mode: 'check', url: 'https://www.cloudflare.com/cdn-cgi/trace', attempts: 3, concurrent: 40, timeout: 5 });
     if (!checkRun) { send('error', { error: '无法启动检测' }); return res.end(); }
     checkRun.clients.push({ write: (msg) => { const m = msg.match(/^event: (\w+)\ndata: (.+)\n\n$/); if (m) send(m[1], JSON.parse(m[2])); } });
     const checkCheckDone = () => new Promise((resolve) => { const iv = setInterval(() => { if (checkRun.status === 'done' || checkRun.status === 'failed') { clearInterval(iv); resolve(checkRun.status); } }, 200); });
@@ -446,7 +501,7 @@ const server = http.createServer(async (req, res) => {
 });
 // 智能池管理定时器
 setInterval(async () => {
-  if (!activeRun && !isRechecking && (readPool().active?.length || 0) > 0) {
+  if (!activeRun && !isRechecking && !isRefilling && (readPool().active?.length || 0) > 0) {
     console.log('定时复检开始');
     await smartRecheck(POOL_RECHECK_COUNT);
   }
