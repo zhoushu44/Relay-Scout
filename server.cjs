@@ -220,7 +220,7 @@ async function smartRefill(targetSize = POOL_TARGET_SIZE) {
     fs.writeFileSync(path.join(root, 'generated_socks5.txt'), newLinks.join('\n') + (newLinks.length ? '\n' : ''), 'utf8');
     
     const resultFile = path.join(root, `refill-${Date.now()}.json`);
-    const python = process.platform === 'win32' ? 'python' : 'python3';
+    const python = process.platform === 'win32' ? 'python' : (process.env.PYTHON_BIN || '/opt/venv/bin/python');
     const args = ['cf_quality_checker.py', '-f', path.join(root, 'generated_socks5.txt'), '-u', 'https://www.cloudflare.com/cdn-cgi/trace', '-n', '1', '-c', '200', '-t', '3', '--threshold', '0', '--max-latency', '3000', '--json-output', resultFile];
     
     await new Promise((resolve, reject) => {
@@ -308,7 +308,7 @@ function safeNumber(value, fallback, min, max) { const n = Number(value); return
 function summarize(run) { const results = run.results || []; const latencies = results.filter((item) => item.latency); return { total: results.length, qualified: results.filter((item) => item.qualified).length, averageRate: results.length ? results.reduce((sum, item) => sum + (item.rate || 0), 0) / results.length : 0, averageLatency: latencies.length ? latencies.reduce((sum, item) => sum + item.latency, 0) / latencies.length : 0, results }; }
 function runTask(run) {
   const resultFile = path.join(root, `${run.id}.json`); const isScrape = run.config.mode === 'scrape'; const isConnectivity = run.config.mode === 'connectivity';
-  const inputFile = path.join(root, 'generated_socks5.txt'); if (run.config.mode === 'recheck') preparePoolCheck(); const python = process.platform === 'win32' ? 'python' : 'python3';
+  const inputFile = path.join(root, 'generated_socks5.txt'); if (run.config.mode === 'recheck') preparePoolCheck(); const python = process.platform === 'win32' ? 'python' : (process.env.PYTHON_BIN || '/opt/venv/bin/python');
   const checkInput = inputFile;
   const checkUrl = run.config.url;
   const args = isScrape

@@ -22,8 +22,11 @@ WORKDIR /app
 
 # 安装 pm2 + Python3 及检测依赖
 RUN npm install -g pm2 && apk add --no-cache python3 py3-pip
-RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir aiohttp aiohttp-socks PyYAML
+RUN python3 -m venv /opt/venv && \
+    /opt/venv/bin/pip install --no-cache-dir aiohttp aiohttp-socks PyYAML && \
+    /opt/venv/bin/python -c "import aiohttp, aiohttp_socks, yaml"
 ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHON_BIN="/opt/venv/bin/python"
 
 # 复制 package 文件
 COPY package*.json ./
