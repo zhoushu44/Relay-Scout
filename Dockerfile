@@ -38,6 +38,7 @@ RUN npm ci --only=production
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/server.cjs ./
 COPY --from=builder /app/cf_quality_checker.py ./
+COPY --from=builder /app/socks-checker.py ./
 COPY --from=builder /app/generated_socks5.txt ./
 COPY --from=builder /app/socks5-pool.json ./
 
